@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+logs/run.jsonl
+.venv/
+
+# editor swap/backup files
+*.swp
+*.swo
+*~
+.#*
+.*.kate-swp
