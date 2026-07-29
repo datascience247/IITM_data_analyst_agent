@@ -1,9 +1,10 @@
 # data-analyst-bot
 
-A Telegram bot backed by a Claude agent. It receives a plain-text data-analysis
-question (optionally as part of a short multi-turn thread), researches the
-answer (web search enabled, useful for MOSPI / data.gov.in / census-style
-lookups), and replies with **exactly one JSON object**:
+A Telegram bot backed by a Groq-hosted LLM agent (default
+`openai/gpt-oss-120b`) with Tavily for live web search. It receives a
+plain-text data-analysis question (optionally as part of a short multi-turn
+thread), researches the answer (web search for MOSPI / data.gov.in /
+census-style lookups), and replies with **exactly one JSON object**:
 
 ```json
 {"answer": <shaped as asked>, "log_url": "https://your-host/run.jsonl"}
@@ -16,11 +17,12 @@ served publicly at `GET /run.jsonl` by the same process.
 
 - `bot.py` — long-polls the Telegram `getUpdates` API (no webhook/HTTPS
   callback config needed on Telegram's side).
-- `agent.py` — calls the Claude API (`web_search` tool enabled) with the
-  chat's message history, and forces the model's final output into the exact
-  `{"answer": ..., "log_url": ...}` shape. `log_url` is always overwritten
-  with your real public URL after the fact, so the model can never break that
-  part.
+- `agent.py` — calls Groq's OpenAI-compatible API (default
+  `openai/gpt-oss-120b`) with the chat's message history, exposes a
+  `tavily_search` tool for live web lookups, and forces the model's final
+  output into the exact `{"answer": ..., "log_url": ...}` shape. `log_url`
+  is always overwritten with your real public URL after the fact, so the
+  model can never break that part.
 - `storage.py` — tiny in-memory per-chat message history (so multi-turn
   threads work) + append-only JSONL logger.
 - `app.py` — Flask app that starts the polling loop in a background thread
@@ -40,14 +42,16 @@ python3 app.py
 
 Then message your bot on Telegram and watch the logs.
 
-### Getting the two required secrets
+### Getting the three required secrets
 
 1. **Telegram bot token** — open a chat with **@BotFather** on Telegram,
    send `/newbot`, follow the prompts. It gives you a token
    (`123456:ABC...`) and you pick the bot's username — **it must end in
    `bot`**, e.g. `navyaa_dataanalyst_bot`.
-2. **Anthropic API key** — from the [Claude Console](https://console.claude.com)
-   (Settings → API Keys). Put it in `ANTHROPIC_API_KEY`.
+2. **Groq API key** — from [console.groq.com](https://console.groq.com/keys).
+   Free tier available. Put it in `GROQ_API_KEY`.
+3. **Tavily API key** — from [tavily.com](https://tavily.com). Free tier
+   available. Used for live web search. Put it in `TAVILY_API_KEY`.
 
 `PUBLIC_LOG_URL` should be the URL your log will be reachable at *after*
 deployment (see step 3) — set it before your first graded run, since that's
@@ -73,9 +77,9 @@ URL works. Two easy free-tier options:
 ### Option A — Render.com
 1. New → Web Service → connect your GitHub repo.
 2. Environment: Docker (it'll pick up the `Dockerfile` automatically).
-3. Add environment variables: `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`,
-   `PUBLIC_LOG_URL` (use the `*.onrender.com` URL Render assigns you,
-   `+ /run.jsonl`), optionally `AGENT_MODEL`.
+3. Add environment variables: `TELEGRAM_BOT_TOKEN`, `GROQ_API_KEY`,
+   `TAVILY_API_KEY`, `PUBLIC_LOG_URL` (use the `*.onrender.com` URL Render
+   assigns you, `+ /run.jsonl`), optionally `AGENT_MODEL`.
 4. **Enable a persistent disk** (Render dashboard → Disks) mounted at
    `/app/logs`, so your log survives restarts/redeploys. Without it the log
    still works, just resets on redeploy.
@@ -83,7 +87,7 @@ URL works. Two easy free-tier options:
    instance type, or ping the free tier periodically (see note below).
 
 ### Option B — Railway.app / Fly.io
-Same idea: point it at the Dockerfile, set the three env vars, add a volume
+Same idea: point it at the Dockerfile, set the four env vars, add a volume
 mounted at `/app/logs` for persistence, deploy.
 
 > **Free-tier idle note:** some free tiers spin services down after
@@ -112,11 +116,17 @@ Submit, comma-separated:
 
 ## Notes / things you may want to tune
 
-- **Model**: defaults to `claude-sonnet-4-6` via `AGENT_MODEL` env var. Swap
-  to a cheaper/faster model if you're cost-constrained, or a stronger one for
-  harder quantitative questions — check
-  [docs.claude.com](https://docs.claude.com/en/docs/about-claude/models/overview)
-  for current model IDs.
+- **Model**: defaults to `openai/gpt-oss-120b` (OpenAI's open-weight
+  reasoning model served on Groq) via `AGENT_MODEL` env var. Other Groq-hosted
+  options: `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`,
+  `mixtral-8x7b-32768`. Pick whichever fits your cost/latency tradeoff —
+  reasoning models like `gpt-oss-120b` are stronger on quantitative questions
+  but burn more tokens per call.
+- **Reasoning tokens**: `openai/gpt-oss-120b` (and other reasoning models)
+  consume tokens for internal chain-of-thought, counted against
+  `MAX_COMPLETION_TOKENS`. The default of 8000 is plenty for a single
+  search + answer round; bump it if you see the model getting truncated mid-
+  answer.
 - **Multi-turn**: every incoming message is appended to that chat's history
   (last 20 messages kept) and the bot replies to *every* message using full
   context — matching "a short sequence of messages; answer the last one."
