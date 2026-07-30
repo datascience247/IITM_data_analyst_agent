@@ -42,11 +42,13 @@ MODEL = os.environ.get("AGENT_MODEL", "openai/gpt-oss-120b")
 
 # Reasoning models (gpt-oss-*) use max_completion_tokens, NOT max_tokens.
 # Groq free-tier TPM for openai/gpt-oss-120b is 8000 — input tokens + this
-# budget must fit. 4000 leaves headroom for system prompt + tool def +
-# question text + a few rounds of tool results, while still giving the
-# reasoning model enough room for its chain-of-thought + final answer.
-MAX_COMPLETION_TOKENS = int(os.environ.get("MAX_COMPLETION_TOKENS", "4000"))
-MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "6"))  # safety cap on tool-use turns
+# budget must fit. 3000 leaves room for ~1500 input + ~1500 reasoning
+# tokens + final JSON answer without going over the TPM budget per request.
+MAX_COMPLETION_TOKENS = int(os.environ.get("MAX_COMPLETION_TOKENS", "3000"))
+# Cap tool-use rounds tighter than before — reasoning model often does
+# multi-round verification, but for graded MOSPI-style questions one or two
+# search rounds are enough. Lower cap also means fewer token-burning rounds.
+MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "2"))
 
 TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
 TAVILY_MAX_RESULTS = int(os.environ.get("TAVILY_MAX_RESULTS", "5"))
@@ -58,9 +60,10 @@ SYSTEM_PROMPT = """You are a data analyst answering one graded question. Only th
 Rules:
 1. The question text specifies the exact JSON shape to reply with, e.g. `{"answer": {"state": "..."}, "log_url": "..."}`. Match keys, nesting, and value types (string vs number vs list vs object) exactly.
 2. If the question references a public dataset (MOSPI, data.gov.in, census, NFHS, RBI) and you are not certain of the figures, call the tavily_search tool first. Prefer official .gov.in sources.
-3. Your FINAL message must contain ONLY the JSON object — no markdown, no fences, no preamble, no trailing text. Must START with `{` and END with `}`.
-4. For "log_url", output the literal string "PLACEHOLDER" — it gets replaced automatically.
-5. Numbers: plain numbers unless the example shape shows strings.
+3. CRITICAL — TOOL USAGE: You have exactly ONE tool available, called `tavily_search`. Do NOT invent or call any other tool names (no open_file, no read_url, no browse, etc.). If tavily_search returns a URL you want to read more about, call tavily_search again with a more specific query — do not attempt to "open" or "read" the URL directly.
+4. Your FINAL message must contain ONLY the JSON object — no markdown, no fences, no preamble, no trailing text. Must START with `{` and END with `}`.
+5. For "log_url", output the literal string "PLACEHOLDER" — it gets replaced automatically.
+6. Numbers: plain numbers unless the example shape shows strings.
 """
 
 # --- tool definitions -------------------------------------------------------
@@ -123,6 +126,62 @@ TOOL_DISPATCH = {
 }
 
 
+# --- Groq API call with proper rate-limit handling -------------------------
+
+# How many times to retry on 429 before giving up. 3 retries with exponential
+# backoff + jitter covers most bursty cases; longer waits than that and the
+# grader's timeout is probably already exceeded.
+_GROQ_MAX_RETRIES = 3
+_GROQ_BACKOFF_BASE = 5  # seconds; 5 -> 10 -> 20 with jitter
+
+
+def _groq_chat_with_backoff(client, messages):
+    """Call Groq with exponential backoff honoring the Retry-After header on 429s.
+
+    Groq free-tier TPM for openai/gpt-oss-120b is 8000; the per-minute budget
+    can be exhausted by bursty test traffic. The Retry-After header tells us
+    how long to wait; if missing, fall back to exponential backoff with jitter.
+    """
+    import random
+
+    last_exc = None
+    for attempt in range(_GROQ_MAX_RETRIES + 1):
+        try:
+            return client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=[TAVILY_TOOL],
+                # Reasoning models (gpt-oss-*) need max_completion_tokens.
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+            )
+        except Exception as e:
+            last_exc = e
+            # openai.APIStatusError carries status_code + response.headers
+            status = getattr(e, "status_code", None)
+            if status is None:
+                # Try to extract from string (older exception types)
+                s = str(e).lower()
+                status = 429 if ("429" in s or "rate" in s or "try again" in s) else None
+            if status != 429 or attempt == _GROQ_MAX_RETRIES:
+                raise
+
+            # Compute wait time: prefer Retry-After header, else exponential + jitter
+            wait = _GROQ_BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 2)
+            try:
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    retry_after = resp.headers.get("retry-after")
+                    if retry_after:
+                        wait = max(wait, float(retry_after))
+            except (AttributeError, ValueError):
+                pass
+
+            print(f"[agent] Groq 429, backing off {wait:.1f}s (attempt {attempt + 1}/{_GROQ_MAX_RETRIES})")
+            time.sleep(wait)
+
+    raise last_exc  # unreachable, but keeps type-checkers happy
+
+
 # --- JSON extraction (model-agnostic) ---------------------------------------
 
 def _extract_json(text: str) -> dict:
@@ -176,29 +235,7 @@ def answer_question(history: list[dict], real_log_url: str) -> dict:
     final_text = ""
 
     for round_num in range(MAX_TOOL_ROUNDS + 1):
-        try:
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                tools=[TAVILY_TOOL],
-                # Reasoning models (gpt-oss-*) need max_completion_tokens, not
-                # max_tokens — the API rejects max_tokens on these models.
-                max_completion_tokens=MAX_COMPLETION_TOKENS,
-                # We don't want the model streaming for our use case.
-            )
-        except Exception as e:
-            # Groq free tier occasionally 429s. Retry once after a short wait.
-            err_str = str(e).lower()
-            if "429" in err_str or "rate" in err_str or "try again" in err_str:
-                time.sleep(2)
-                response = client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages,
-                    tools=[TAVILY_TOOL],
-                    max_completion_tokens=MAX_COMPLETION_TOKENS,
-                )
-            else:
-                raise
+        response = _groq_chat_with_backoff(client, messages)
 
         choice = response.choices[0]
         msg = choice.message
@@ -207,6 +244,8 @@ def answer_question(history: list[dict], real_log_url: str) -> dict:
         if msg.content:
             transcript.append({"type": "text", "text": msg.content})
             final_text = msg.content  # last text we see is the final answer
+        else:
+            transcript.append({"type": "text", "text": f"[no content, finish_reason={choice.finish_reason}]"})
 
         tool_calls = msg.tool_calls or []
         if not tool_calls or choice.finish_reason != "tool_calls":
@@ -249,9 +288,31 @@ def answer_question(history: list[dict], real_log_url: str) -> dict:
 
         time.sleep(0.3)  # tiny courtesy pause
 
+    # If we exited the tool loop without ever producing a final text answer
+    # (e.g. the model kept calling tavily_search up to MAX_TOOL_ROUNDS), append
+    # a synthetic user message asking for the final JSON and make one more
+    # call. This is the cleanest way to break a tool-call loop — the
+    # alternative (omitting tools or tool_choice=none) makes Groq reject the
+    # request because the previous assistant turn contained tool_calls.
+    if not final_text:
+        messages.append({
+            "role": "user",
+            "content": (
+                "You have enough information from the searches above. "
+                "Reply NOW with the final JSON object only — no more tool calls. "
+                "Output exactly the JSON shape the original question requested."
+            ),
+        })
+        transcript.append({"type": "text", "text": "[force final answer via synthetic user message]"})
+        forced = _groq_chat_with_backoff(client, messages)
+        fmsg = forced.choices[0].message
+        if fmsg.content:
+            transcript.append({"type": "text", "text": fmsg.content})
+            final_text = fmsg.content
+
     raw_text = (final_text or "").strip()
     if not raw_text:
-        # Shouldn't happen with a reasoning model, but guard anyway.
+        # Last-resort guard: model produced nothing across all rounds.
         raise ValueError("Model produced no text content")
 
     parsed = _extract_json(raw_text)

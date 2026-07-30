@@ -1,9 +1,9 @@
 """
 storage.py — append-only JSONL run log + tiny in-memory per-chat history.
 
-The log file is served directly by app.py at GET /run.jsonl, so it stays a
-plain flat file on disk (works fine on a single always-on instance, which is
-what this bot needs — see README for persistent-disk notes on your host).
+The log file lives at the repo root (`run.jsonl`) so it can be committed and
+pushed to GitHub — the raw GitHub URL is the public wget-able log_url the
+grader downloads. See README for the auto-push workflow.
 """
 
 import json
@@ -12,7 +12,7 @@ import threading
 import time
 from collections import defaultdict, deque
 
-LOG_PATH = os.environ.get("LOG_PATH", "logs/run.jsonl")
+LOG_PATH = os.environ.get("LOG_PATH", "run.jsonl")
 _lock = threading.Lock()
 
 # chat_id -> deque of {"role": ..., "content": ...}

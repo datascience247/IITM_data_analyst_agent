@@ -1,7 +1,6 @@
 .env
 __pycache__/
 *.pyc
-logs/run.jsonl
 .venv/
 
 # editor swap/backup files
@@ -10,3 +9,16 @@ logs/run.jsonl
 *~
 .#*
 .*.kate-swp
+
+# run.jsonl is NOT ignored - it lives at the repo root and gets pushed to
+# GitHub so the public raw.githubusercontent.com URL serves as the
+# wget-able log_url. To exclude it from git temporarily (e.g. during local
+# testing before you've added your real keys), set LOG_PATH elsewhere via env
+# var, or use: git update-index --skip-worktree run.jsonl
+
+# Auto-push state file (tracks last-pushed byte count to skip unchanged logs)
+run.jsonl.last_push_size
+
+# Diagnostic logs from external services (e.g. Groq usage exports)
+*.csv
+!evals/**/*.csv
