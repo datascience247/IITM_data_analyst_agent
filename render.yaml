@@ -65,15 +65,19 @@ services:
     # helps keep free-tier instances warm.
     healthCheckPath: /
 
-# Uncomment if you want a cron-style job to keep the service warm. Render's
-# free tier spins down after 15 min of no traffic; this ping-every-5-minutes
-# workaround is cheaper than the $7/mo always-on plan.
+# Keep-alive: Render free tier spins the web service down after 15 min of
+# no incoming traffic. A cron job inside the same Render project can't help,
+# because cron jobs and web services are separate service types running in
+# separate containers — the cron container boots, sits idle (no Telegram
+# traffic to handle), and exits without ever making an HTTP request to the
+# web service's URL. So the web service still falls asleep exactly as if the
+# cron didn't exist.
 #
-# - type: cron
-#   name: data-analyst-bot-ping
-#   runtime: docker
-#   schedule: "*/5 * * * *"
-#   dockerfilePath: ./Dockerfile
-#   envVars:
-#     - key: PING_ONLY
-#       value: "true"
+# Use an external HTTP pinger instead — point a free monitor at
+# https://data-analyst-bot.onrender.com/ on a 5–14 min interval. UptimeRobot
+# (https://uptimerobot.com) free tier is enough: 50 monitors, 5-min interval.
+# Better Uptime or cron-job.org work too.
+#
+# Note: Render's own healthCheckPath ping above is for liveness signalling
+# only — Render explicitly does NOT use it to prevent free-tier spin-down.
+# The external pinger is what actually keeps the service warm.
