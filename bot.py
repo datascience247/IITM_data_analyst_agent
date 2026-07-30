@@ -22,9 +22,22 @@ log = logging.getLogger("bot")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 API_BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-LOG_URL = os.environ["PUBLIC_LOG_URL"]  # e.g. https://your-host.onrender.com/run.jsonl
-
 POLL_TIMEOUT = 25
+
+
+def _get_log_url() -> str:
+    """Resolve the public log URL lazily so we pick up env vars / git
+    remote that may be set after this module is imported."""
+    # Inline import to avoid a circular import (app.py imports bot.py)
+    try:
+        from app import resolve_public_log_url
+        return resolve_public_log_url()
+    except Exception:
+        # Fallback if app.py isn't available (e.g. running bot.py standalone)
+        return os.environ.get(
+            "LOG_PUBLIC_URL",
+            os.environ.get("PUBLIC_LOG_URL", "http://localhost:8000/run.jsonl"),
+        )
 
 
 def send_message(chat_id: int, text: str) -> None:
@@ -42,9 +55,10 @@ def send_message(chat_id: int, text: str) -> None:
 def handle_message(chat_id: int, text: str) -> None:
     storage.add_message(chat_id, "user", text)
     history = storage.get_history(chat_id)
+    log_url = _get_log_url()
 
     try:
-        result = answer_question(history, LOG_URL)
+        result = answer_question(history, log_url)
         final_json = result["final_json"]
         import json as _json
 
@@ -70,7 +84,7 @@ def handle_message(chat_id: int, text: str) -> None:
 def _json_error(e: Exception) -> str:
     import json as _json
 
-    return _json.dumps({"answer": None, "error": str(e), "log_url": LOG_URL})
+    return _json.dumps({"answer": None, "error": str(e), "log_url": _get_log_url()})
 
 
 def run_polling() -> None:

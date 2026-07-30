@@ -35,6 +35,78 @@ _lock = threading.Lock()
 #   git add run.jsonl && git commit -m log && git push
 
 
+# --- public log URL resolution ---------------------------------------------
+#
+# The bot embeds a `log_url` in every Telegram reply so the grader can
+# wget the run log. We resolve this URL with a layered fallback so the
+# repo works for any user without hardcoding:
+#
+#   1. LOG_PUBLIC_URL  — explicit override (use only for non-GitHub hosts)
+#   2. git remote get-url origin — auto-derived from the clone's remote
+#      (works for any GitHub fork/clone — the URL matches wherever the
+#       user actually pushes, which is what the grader should wget)
+#   3. PUBLIC_LOG_URL  — historical name, kept as a final fallback
+#   4. http://localhost:8000/run.jsonl — safe fallback for local dev
+#
+# For #2 we convert either of these forms:
+#   https://github.com/<owner>/<repo>.git
+#   git@github.com:<owner>/<repo>.git
+# into:
+#   https://raw.githubusercontent.com/<owner>/<repo>/<branch>/run.jsonl
+#
+# Branch is read from LOG_BRANCH env var, falling back to the current
+# git branch (default 'main' if that fails).
+
+import re as _re
+
+_GH_HTTPS = _re.compile(r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
+_GH_SSH = _re.compile(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?$")
+
+
+def _run_git(*args):
+    try:
+        r = subprocess.run(
+            ["git"] + list(args), capture_output=True, text=True, timeout=5
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
+def resolve_public_log_url():
+    """Return the public wget-able URL for run.jsonl.
+
+    Priority:
+      1. LOG_PUBLIC_URL (explicit override, e.g. deployed Render URL)
+      2. git remote origin, auto-derived for any GitHub fork/clone
+      3. PUBLIC_LOG_URL (historical, kept as fallback)
+      4. http://localhost:8000/run.jsonl
+
+    Always returns a non-empty string.
+    """
+    override = os.environ.get("LOG_PUBLIC_URL")
+    if override:
+        return override.rstrip("/")
+
+    remote = _run_git("remote", "get-url", "origin")
+    if remote:
+        m = _GH_HTTPS.match(remote) or _GH_SSH.match(remote)
+        if m:
+            owner, repo = m.group(1), m.group(2)
+            branch = os.environ.get(
+                "LOG_BRANCH"
+            ) or _run_git("rev-parse", "--abbrev-ref", "HEAD") or "main"
+            return (
+                f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/run.jsonl"
+            )
+
+    legacy = os.environ.get("PUBLIC_LOG_URL")
+    if legacy:
+        return legacy.rstrip("/")
+
+    return "http://localhost:8000/run.jsonl"
+
+
 _GIT_AUTO_PUSH = os.environ.get("GIT_AUTO_PUSH", "false").lower() in ("1", "true", "yes")
 _PUSH_INTERVAL = int(os.environ.get("GIT_PUSH_INTERVAL_SECONDS", "60"))
 _LAST_PUSH_SIZE_FILE = os.environ.get("LOG_PATH", "run.jsonl") + ".last_push_size"
