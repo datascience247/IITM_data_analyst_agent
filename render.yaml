@@ -1,0 +1,79 @@
+# Render Blueprint — point Render at this repo and it auto-configures the
+# web service. Set the three secret env vars in the Render dashboard after
+# creating the service; everything else is inferred from the Dockerfile and
+# this file.
+#
+# Deploy: Render Dashboard -> New -> Blueprint -> connect this repo.
+# After first deploy: Dashboard -> Disks -> confirm "logs" is mounted at /app/logs.
+
+services:
+  - type: web
+    name: data-analyst-bot
+    runtime: docker
+    plan: free
+    # Region defaults to oregon; change if you want something closer.
+    region: oregon
+    dockerfilePath: ./Dockerfile
+
+    envVars:
+      # Secrets — set these in the Render dashboard, NOT in this file.
+      # Render keeps them encrypted at rest and never echoes them back.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+
+      # Optional overrides — set in dashboard if you want different values.
+      # Uncomment any of these and they'll be applied at deploy time.
+      # - key: AGENT_MODEL
+      #   value: openai/gpt-oss-120b
+      # - key: MAX_COMPLETION_TOKENS
+      #   value: 3000
+      # - key: MAX_TOOL_ROUNDS
+      #   value: 2
+      # - key: TAVILY_MAX_RESULTS
+      #   value: 3
+
+      # If you want to override the auto-derived log URL (e.g. point at
+      # the Render host instead of GitHub), uncomment and set this:
+      # - key: LOG_PUBLIC_URL
+      #   value: https://data-analyst-bot.onrender.com/run.jsonl
+
+      # Auto-push run.jsonl to GitHub so the grader can wget it from
+      # raw.githubusercontent.com. Requires a GitHub PAT (Settings ->
+      # Developer settings -> Personal access tokens -> Fine-grained ->
+      # Contents: Read and write on this repo only).
+      - key: GIT_AUTO_PUSH
+        value: "true"
+      - key: GIT_PUSH_INTERVAL_SECONDS
+        value: "60"
+      - key: GITHUB_TOKEN
+        sync: false
+
+    # Persistent disk so run.jsonl survives redeploys. Without this the log
+    # resets every time Render rebuilds the container. Mount path matches
+    # the Dockerfile's WORKDIR (/app).
+    disk:
+      name: logs
+      mountPath: /app/logs
+      sizeGB: 1
+
+    # Health check — Render pings / periodically to confirm the service is up.
+    # If you set up an uptime pinger (UptimeRobot etc.) on this URL it also
+    # helps keep free-tier instances warm.
+    healthCheckPath: /
+
+# Uncomment if you want a cron-style job to keep the service warm. Render's
+# free tier spins down after 15 min of no traffic; this ping-every-5-minutes
+# workaround is cheaper than the $7/mo always-on plan.
+#
+# - type: cron
+#   name: data-analyst-bot-ping
+#   runtime: docker
+#   schedule: "*/5 * * * *"
+#   dockerfilePath: ./Dockerfile
+#   envVars:
+#     - key: PING_ONLY
+#       value: "true"
