@@ -1,1 +1,2 @@
 {"ts": 1234.5, "chat_id": 999, "incoming_message": "test", "reply": "ok", "raw_model_text": "ok", "transcript": []}
+{"ts": 1785390712.8609784, "chat_id": 6864310334, "incoming_message": "Hi\nTell me about the types of biomes in india", "reply": "{\"answer\": {}, \"log_url\": \"http://localhost:8000/run.jsonl\"}", "raw_model_text": "{}", "transcript": [{"type": "text", "text": "{}"}]}
